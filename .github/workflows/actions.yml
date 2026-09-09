@@ -20,33 +20,45 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-  
+
       - name: Verify Node.js Version
         run: node -v
 
       - name: Download cortexcli
         run: |
-          set -x
-          crtx_resp=$(curl "${CORTEX_API_URL}/public_api/v1/unified-cli/releases/download-link?os=linux&architecture=amd64" \
+          set -e
+          
+          # Use -sS to hide progress meters but show errors, and --fail to handle HTTP errors
+          crtx_resp=$(curl -sS --fail "${CORTEX_API_URL}/public_api/v1/unified-cli/releases/download-link?os=linux&architecture=amd64" \
             -H "x-xdr-auth-id: ${CORTEX_API_KEY_ID}" \
             -H "Authorization: ${CORTEX_API_KEY}")
-          crtx_url=$(echo $crtx_resp | jq -r ".signed_url")
-          curl -o cortexcli $crtx_url
+
+          # Safely extract signed_url
+          crtx_url=$(echo "$crtx_resp" | jq -r '.signed_url // empty')
+
+          if [ -z "$crtx_url" ] || [ "$crtx_url" = "null" ]; then
+            echo "::error::Failed to parse signed_url from response: $crtx_resp"
+            exit 1
+          fi
+
+          # Download the binary silently
+          curl -sS -o cortexcli "$crtx_url"
           chmod +x cortexcli
           ./cortexcli --version
-    
+
       - name: Run Cortex Code Scan (customer config)
         id: scan
         shell: bash
         env:
           CORTEXCLI_HOME: ${{ runner.temp }}/cortexcli
           CORTEX_DEBUG: true
+          SOURCE_DIR: "."
+          EXCLUDE_PATHS: ""
         run: |
-
           SCAN_DIR="$(mktemp -d)"
           EXCLUDE_FILE="${SCAN_DIR}/.cortex-excludes"
           mkdir -p "${CORTEXCLI_HOME}"
-  
+
           CORTEX_DEBUG_ARGS=()
           if [ "${CORTEX_DEBUG}" = "true" ]; then
             CORTEX_DEBUG_ARGS=(--log --log-level INFO --support)
@@ -86,21 +98,19 @@ jobs:
             --create-repo-if-missing
           SCAN_EXIT=$?
           set -e
-  
+
           if [ "$SCAN_EXIT" -eq 0 ]; then
             echo "Scan completado exitosamente"
             exit 0
           fi
-  
-          # Politica: el fallo siempre bloquea, salvo que el repo este en
-          # allow-failure.list (vive junto a este action.yml en tipti-actions).
+
           ALLOW_FILE="${GITHUB_ACTION_PATH}/allow-failure.list"
-  
+
           if [ -f "$ALLOW_FILE" ] && sed -e 's/#.*//' -e 's/[[:space:]]//g' "$ALLOW_FILE" | grep -Fqix "${GITHUB_REPOSITORY}"; then
             echo "::warning::Cortex fallo (exit ${SCAN_EXIT}), pero ${GITHUB_REPOSITORY} esta en allow-failure.list. Pipeline continua."
             exit 0
           fi
-  
+
           echo "::error::Cortex detecto problemas (exit ${SCAN_EXIT}). Pipeline bloqueado."
           echo ""
           echo "Opciones:"
